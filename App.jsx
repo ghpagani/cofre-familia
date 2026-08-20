@@ -76,7 +76,7 @@ export const PAPEIS = [
 ];
 const MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const MESES_LONGOS = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
-export const PALETA = ["#0F6E5B", "#8A466A", "#B4842F", "#3C6E9F", "#B0563A", "#5C7A4A", "#6E5B8A", "#A8763F"];
+export const PALETA = ["#315C4D", "#46746A", "#79516F", "#9A7B36", "#B65C45", "#5C7A4A", "#6E5B8A", "#A8763F"];
 
 /* ================================================================== */
 /*  UTIL                                                               */
@@ -117,6 +117,30 @@ export const somaMesesISO = (dataISO, n) => {
   const dia = Math.min(p.d || 1, ultimo);
   return `${t.a}-${String(t.m).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
 };
+/* início e fim do mês financeiro (ano, mes), respeitando o dia de virada */
+export const janelaDoMes = (ano, mes, diaIni) => {
+  const d = Math.min(Math.max(+diaIni || 1, 1), 28);
+  if (d === 1) {
+    const ult = new Date(ano, mes, 0).getDate();
+    return { ini: `${ano}-${String(mes).padStart(2, "0")}-01`, fim: `${ano}-${String(mes).padStart(2, "0")}-${ult}` };
+  }
+  const p = somaMeses(ano, mes, -1);
+  const dd = String(d).padStart(2, "0");
+  const dAnt = String(d - 1).padStart(2, "0");
+  return {
+    ini: `${p.a}-${String(p.m).padStart(2, "0")}-${dd}`,
+    fim: `${ano}-${String(mes).padStart(2, "0")}-${dAnt}`,
+  };
+};
+/* fração já percorrida do mês financeiro (0 a 1) */
+export const ritmoDoMes = (ano, mes, diaIni, hojeISO) => {
+  const { ini, fim } = janelaDoMes(ano, mes, diaIni);
+  const ms = (s) => { const p = parseISO(s); return Date.UTC(p.y, p.m - 1, p.d); };
+  const total = ms(fim) - ms(ini);
+  if (total <= 0) return 0;
+  return Math.max(0, Math.min(1, (ms(hojeISO) - ms(ini)) / total));
+};
+
 /* quantos meses inteiros separam duas datas ISO (b - a) */
 export const mesesEntre = (aISO, bISO) => {
   const a = parseISO(aISO), b = parseISO(bISO);
@@ -396,6 +420,33 @@ export function computeDerived(state, ano, mes, cotacoes) {
 }
 
 /* ================================================================== */
+/*  NÚMERO QUE ANIMA                                                   */
+/* ================================================================== */
+function useNumeroSuave(alvo, ms = 550) {
+  const [v, setV] = useState(alvo);
+  const de = useRef(alvo);
+  useEffect(() => {
+    const inicio = de.current;
+    if (inicio === alvo) return;
+    if (typeof window === "undefined" || !window.requestAnimationFrame) { setV(alvo); de.current = alvo; return; }
+    const reduz = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    if (reduz) { setV(alvo); de.current = alvo; return; }
+    const t0 = performance.now();
+    let raf;
+    const passo = (t) => {
+      const p = Math.min((t - t0) / ms, 1);
+      const e = 1 - Math.pow(1 - p, 3);
+      setV(inicio + (alvo - inicio) * e);
+      if (p < 1) raf = requestAnimationFrame(passo);
+      else de.current = alvo;
+    };
+    raf = requestAnimationFrame(passo);
+    return () => cancelAnimationFrame(raf);
+  }, [alvo, ms]);
+  return v;
+}
+
+/* ================================================================== */
 /*  COTAÇÕES (dólar e euro ao vivo)                                    */
 /* ================================================================== */
 const COT_KEY = "cofre-familia-cotacoes";
@@ -532,13 +583,18 @@ export default function App() {
         {aba === "config" && <Ajustes state={state} update={update} setState={setState} d={derived} />}
       </main>
 
+      <button className="fab" style={sx.fab} aria-label={aba === "lancar" ? "Fechar" : "Lançar"}
+        onClick={() => setAba(aba === "lancar" ? "painel" : "lancar")}>
+        {aba === "lancar" ? <X size={26} /> : <Plus size={26} />}
+      </button>
+
       <nav style={sx.nav}>
-        {[["painel", "Painel", Wallet], ["lancar", "Lançar", Plus], ["previsto", "Previsto", ClipboardList],
-          ["dividas", "Dívidas", Receipt], ["patrim", "Patrim.", TrendingUp],
+        {[["painel", "Início", Wallet], ["previsto", "Previsto", ClipboardList],
+          ["dividas", "Dívidas", Receipt], ["patrim", "Patrimônio", TrendingUp],
           ["config", "Ajustes", Settings]].map(([id, label, Icon]) => (
           <button key={id} onClick={() => setAba(id)} className="navbtn"
             style={{ ...sx.navBtn, ...(aba === id ? sx.navBtnOn : {}) }}>
-            <Icon size={18} /><span style={sx.navLabel}>{label}</span>
+            <Icon size={19} /><span style={sx.navLabel}>{label}</span>
           </button>
         ))}
       </nav>
@@ -553,18 +609,40 @@ function Painel({ d, state, ano, mes, irPara }) {
   const reservaPct = d.reservaAlvo > 0 ? Math.min(d.reservaAtual / d.reservaAlvo, 1) : 0;
   const semConfig = d.rendaTotal === 0;
   const comEnvelope = d.envelopes.filter((e) => e.teto > 0 || e.gastou > 0);
+  const sobraSuave = useNumeroSuave(d.sobra);
+
+  /* ritmo: só faz sentido quando estamos olhando o mês corrente */
+  const hoje = todayISO();
+  const fHoje = mesFin(hoje, d.diaIni);
+  const ehMesCorrente = fHoje.a === ano && fHoje.m === mes;
+  const ritmo = ehMesCorrente ? ritmoDoMes(ano, mes, d.diaIni, hoje) : 0;
+  const gastoPrev = d.totalPrevisto > 0 ? d.totalPrevisto : d.rendaTotal;
+  const ritmoGasto = gastoPrev > 0 ? d.saidas / gastoPrev : 0;
+  const adiantado = ritmoGasto - ritmo;
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <div style={sx.hero}>
-        <div style={sx.heroEye}>SOBRA DESTE MÊS</div>
-        <div style={{ ...sx.heroNum, color: d.sobra >= 0 ? "#EAF6F1" : "#F6D9CF" }}>{brl(d.sobra)}</div>
+      <div style={sx.hero} className="rise">
+        <div style={sx.heroEye}>saldo livre em {MESES_LONGOS[mes - 1].toLowerCase()}</div>
+        <div style={{ ...sx.heroNum, color: d.sobra >= 0 ? "#EFF6F2" : "#F7DDD3" }}>{brl(sobraSuave)}</div>
         <div style={sx.heroRow}>
-          <span style={sx.heroChip}><ArrowDownLeft size={13} /> {brl0(d.entradas)}</span>
-          <span style={sx.heroChip}><ArrowUpRight size={13} /> {brl0(d.saidas)}</span>
-          <span style={sx.heroChip}><Coins size={13} /> {brl0(d.aportes)} investido</span>
+          <span style={sx.heroChip}><ArrowDownLeft size={13} /> {brl0(d.entradas)} entradas</span>
+          <span style={sx.heroChip}><ArrowUpRight size={13} /> {brl0(d.saidas)} saídas</span>
+          {d.aportes > 0 && <span style={sx.heroChip}><Coins size={13} /> {brl0(d.aportes)} investido</span>}
         </div>
-        <div style={sx.heroSavings}>taxa de poupança <b>{pct(d.taxa)}</b></div>
+        <div style={sx.heroSavings}><b>{pct(d.taxa)}</b> de economia</div>
+        {ehMesCorrente && gastoPrev > 0 && (
+          <div style={sx.heroRitmo}>
+            {MESES_LONGOS[mes - 1]} está {Math.round(ritmo * 100)}% concluído e {Math.round(ritmoGasto * 100)}% do
+            previsto já foi gasto
+            {Math.abs(adiantado) < 0.05 ? " — no ritmo certo." : adiantado > 0
+              ? " — o gasto está adiantado."
+              : " — o gasto está abaixo do ritmo."}
+            <div style={sx.heroRitmoBar}>
+              <div style={{ ...sx.heroRitmoFill, width: `${Math.min(ritmoGasto, 1) * 100}%` }} />
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={sx.kpiRow}>
@@ -646,16 +724,16 @@ function Painel({ d, state, ano, mes, irPara }) {
           <AreaChart data={d.porMes} margin={{ top: 6, right: 6, left: -18, bottom: 0 }}>
             <defs>
               <linearGradient id="gAcc" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#0F6E5B" stopOpacity={0.35} />
-                <stop offset="100%" stopColor="#0F6E5B" stopOpacity={0.02} />
+                <stop offset="0%" stopColor="#315C4D" stopOpacity={0.35} />
+                <stop offset="100%" stopColor="#315C4D" stopOpacity={0.02} />
               </linearGradient>
             </defs>
-            <XAxis dataKey="nome" tick={{ fontSize: 11, fill: "#5E6B64" }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fontSize: 10, fill: "#9aa39d" }} axisLine={false} tickLine={false}
+            <XAxis dataKey="nome" tick={{ fontSize: 11, fill: "#737A76" }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 10, fill: "#A5AAA5" }} axisLine={false} tickLine={false}
               tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)} />
-            <Tooltip formatter={(v) => brl(v)} contentStyle={{ borderRadius: 10, border: "1px solid #E2E7E0", fontSize: 12 }} />
-            <ReferenceLine y={0} stroke="#E2E7E0" />
-            <Area type="monotone" dataKey="acumulado" stroke="#0F6E5B" strokeWidth={2.5} fill="url(#gAcc)" name="Acumulado" />
+            <Tooltip formatter={(v) => brl(v)} contentStyle={{ borderRadius: 12, border: "none", fontSize: 12, boxShadow: "0 6px 20px -8px rgba(84,72,56,.28)" }} />
+            <ReferenceLine y={0} stroke="#E9E6DE" />
+            <Area type="monotone" dataKey="acumulado" stroke="#315C4D" strokeWidth={2.5} fill="url(#gAcc)" name="Acumulado" />
           </AreaChart>
         </ResponsiveContainer>
       </div>
@@ -666,11 +744,11 @@ function Painel({ d, state, ano, mes, irPara }) {
           <ResponsiveContainer width="100%" height={Math.max(140, d.porCategoria.length * 32)}>
             <BarChart data={d.porCategoria} layout="vertical" margin={{ left: 8, right: 16 }}>
               <XAxis type="number" hide />
-              <YAxis type="category" dataKey="nome" width={140} tick={{ fontSize: 11, fill: "#4a544e" }} axisLine={false} tickLine={false} />
-              <Tooltip formatter={(v) => brl(v)} cursor={{ fill: "#f0f3ef" }}
-                contentStyle={{ borderRadius: 10, border: "1px solid #E2E7E0", fontSize: 12 }} />
+              <YAxis type="category" dataKey="nome" width={140} tick={{ fontSize: 11, fill: "#4A524C" }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={(v) => brl(v)} cursor={{ fill: "#F1EFE9" }}
+                contentStyle={{ borderRadius: 12, border: "none", fontSize: 12, boxShadow: "0 6px 20px -8px rgba(84,72,56,.28)" }} />
               <Bar dataKey="valor" radius={[0, 6, 6, 0]}>
-                {d.porCategoria.map((_, i) => <Cell key={i} fill={i === 0 ? "#0F6E5B" : "#5FA694"} />)}
+                {d.porCategoria.map((_, i) => <Cell key={i} fill={i === 0 ? "#315C4D" : "#7FA394"} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -684,9 +762,9 @@ function Painel({ d, state, ano, mes, irPara }) {
             <ResponsiveContainer width="100%" height={Math.max(120, d.porPessoa.length * 34)}>
               <BarChart data={d.porPessoa} layout="vertical" margin={{ left: 8, right: 16 }}>
                 <XAxis type="number" hide />
-                <YAxis type="category" dataKey="nome" width={90} tick={{ fontSize: 11.5, fill: "#4a544e" }} axisLine={false} tickLine={false} />
-                <Tooltip formatter={(v) => brl(v)} cursor={{ fill: "#f0f3ef" }}
-                  contentStyle={{ borderRadius: 10, border: "1px solid #E2E7E0", fontSize: 12 }} />
+                <YAxis type="category" dataKey="nome" width={90} tick={{ fontSize: 11.5, fill: "#4A524C" }} axisLine={false} tickLine={false} />
+                <Tooltip formatter={(v) => brl(v)} cursor={{ fill: "#F1EFE9" }}
+                  contentStyle={{ borderRadius: 12, border: "none", fontSize: 12, boxShadow: "0 6px 20px -8px rgba(84,72,56,.28)" }} />
                 <Bar dataKey="valor" radius={[0, 6, 6, 0]}>
                   {d.porPessoa.map((p, i) => <Cell key={i} fill={p.cor} />)}
                 </Bar>
@@ -703,7 +781,7 @@ function Envelope({ e }) {
   const usado = e.teto > 0 ? Math.min(e.gastou / e.teto, 1) : 0;
   const estourou = e.teto > 0 && e.restante < 0;
   return (
-    <div style={{ ...sx.envelope, borderColor: e.cor + "55" }}>
+    <div style={{ ...sx.envelope, borderTopColor: e.cor }}>
       <div style={sx.envTop}>
         <span style={{ ...sx.envName, color: e.cor }}>{e.nome}</span>
         <span style={sx.envMesada}>{e.teto > 0 ? `teto ${brl0(e.teto)}` : "sem teto"}</span>
@@ -1172,7 +1250,7 @@ function Previsto({ state, update, d, ano, mes }) {
         </div>
         <div style={sx.envSimul}>
           {d.envelopes.filter((e) => e.teto > 0).map((e) => (
-            <div key={e.id}><span style={sx.muted}>{e.nome}</span><b style={{ color: e.cor }}>{brl0(e.teto)}</b></div>
+            <div key={e.id}><span style={sx.simulLabel}>{e.nome}</span><b style={{ color: e.cor }}>{brl0(e.teto)}</b></div>
           ))}
         </div>
         <div style={{ ...sx.contaLinha, borderTop: "1px solid var(--line)", marginTop: 8, paddingTop: 10, fontWeight: 700 }}>
@@ -1655,12 +1733,12 @@ function Ajustes({ state, update, setState, d }) {
           </Field>
         </div>
         <div style={sx.resumoCascata}>
-          <div><span style={sx.muted}>Renda</span><b>{brl0(d.rendaTotal)}</b></div>
-          <div><span style={sx.muted}>Fixas</span><b>− {brl0(d.fixasUsadas)}</b></div>
-          <div><span style={sx.muted}>Parcelas</span><b>− {brl0(d.parcelaMensal)}</b></div>
-          <div><span style={sx.muted}>Poupança</span><b>− {brl0(d.metaPoup)}</b></div>
-          <div><span style={sx.muted}>Envelopes</span><b>− {brl0(d.somaEnvelopes)}</b></div>
-          <div><span style={sx.muted}>{d.folga >= 0 ? "Folga" : "Falta"}</span>
+          <div><span style={sx.simulLabel}>Renda</span><b>{brl0(d.rendaTotal)}</b></div>
+          <div><span style={sx.simulLabel}>Fixas</span><b>− {brl0(d.fixasUsadas)}</b></div>
+          <div><span style={sx.simulLabel}>Parcelas</span><b>− {brl0(d.parcelaMensal)}</b></div>
+          <div><span style={sx.simulLabel}>Poupança</span><b>− {brl0(d.metaPoup)}</b></div>
+          <div><span style={sx.simulLabel}>Envelopes</span><b>− {brl0(d.somaEnvelopes)}</b></div>
+          <div><span style={sx.simulLabel}>{d.folga >= 0 ? "Folga" : "Falta"}</span>
             <b style={{ color: d.folga >= 0 ? "var(--teal)" : "var(--brick)" }}>{brl0(Math.abs(d.folga))}</b></div>
         </div>
         <p style={sx.help}>
@@ -1729,172 +1807,210 @@ const Bar2 = ({ pct, color }) => (
 );
 
 /* ================================================================== */
+/* ================================================================== */
 /*  ESTILOS                                                            */
 /* ================================================================== */
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap');
-:root{--bg:#EDF1EC;--surface:#FFFFFF;--ink:#17211E;--muted:#5E6B64;--teal:#0F6E5B;--teal-dk:#0A4C40;--gold:#B4842F;--plum:#8A466A;--brick:#BB5138;--line:#E2E7E0;}
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..700,0..100,0..1&family=Inter:wght@400;500;600;700&display=swap');
+:root{
+  --bg:#F6F5F1;
+  --surface:#FFFFFF;
+  --ink:#202522;
+  --muted:#737A76;
+  --teal:#315C4D;
+  --teal-dk:#22443A;
+  --gold:#9A7B36;
+  --gold-lt:#C7A96B;
+  --plum:#79516F;
+  --brick:#B65C45;
+  --line:#E9E6DE;
+  --sh1:0 1px 2px rgba(84,72,56,.05), 0 4px 12px -6px rgba(84,72,56,.10);
+  --sh2:0 2px 6px rgba(84,72,56,.06), 0 14px 30px -14px rgba(84,72,56,.18);
+}
 *{box-sizing:border-box}
-body{margin:0;background:#EDF1EC}
-.inp,.inp2,select,input,button{font-family:Inter,system-ui,sans-serif}
-.inp{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font-size:14px;color:var(--ink);outline:none}
-.inp:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,110,91,.12)}
-.inp2{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:13px;color:var(--ink);outline:none}
-.inp2:focus{border-color:var(--teal)}
-.inp2:disabled{background:#f4f6f3;color:#8a938d}
+body{margin:0;background:var(--bg);font-variant-numeric:tabular-nums}
+.inp,.inp2,select,input,button{font-family:Inter,system-ui,sans-serif;font-variant-numeric:tabular-nums}
+/* Fraunces com hastes mais macias e sem o corte "wonky" dos títulos */
+[style*="Fraunces"]{font-variation-settings:'SOFT' 45,'WONK' 0;letter-spacing:-.01em}
+.inp{width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:12px;background:#FCFBF8;font-size:14px;color:var(--ink);outline:none;transition:border-color .15s,box-shadow .15s,background .15s}
+.inp:focus{border-color:var(--teal);background:#fff;box-shadow:0 0 0 3px rgba(49,92,77,.10)}
+.inp2{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:#FCFBF8;font-size:13px;color:var(--ink);outline:none;transition:border-color .15s,background .15s}
+.inp2:focus{border-color:var(--teal);background:#fff}
+.inp2:disabled{background:#F1EFE9;color:#9AA09B}
 button{cursor:pointer;border:none;background:none}
 button:disabled{opacity:.5;cursor:default}
-.primary:hover{filter:brightness(1.06)}
-.ghost:hover{background:#e6ebe5}
+.primary{transition:transform .12s,box-shadow .2s}
+.primary:hover{box-shadow:0 6px 18px -6px rgba(49,92,77,.5)}
+.primary:active{transform:scale(.97)}
+.ghost{transition:background .15s}
+.ghost:hover{background:#EFECE4}
 .seg:active{transform:scale(.97)}
-.del{opacity:.45;transition:opacity .15s}
+.del{opacity:.4;transition:opacity .15s,color .15s}
 .del:hover{opacity:1;color:var(--brick)}
+.card-lift{transition:box-shadow .2s,transform .2s}
+.fab{transition:transform .18s cubic-bezier(.2,.8,.3,1),box-shadow .2s}
+.fab:active{transform:scale(.92)}
 *:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
 @keyframes spin{to{transform:rotate(360deg)}}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.rise{animation:rise .35s cubic-bezier(.2,.7,.3,1) both}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 `;
 
 const sx = {
-  root: { fontFamily: "Inter,system-ui,sans-serif", background: "var(--bg)", color: "var(--ink)", minHeight: "100vh", paddingBottom: 78, maxWidth: 760, margin: "0 auto", position: "relative" },
-  loadingWrap: { display: "flex", alignItems: "center", justifyContent: "center", height: "60vh", color: "#5E6B64", fontFamily: "Inter,system-ui,sans-serif" },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px 10px" },
+  root: { fontFamily: "Inter,system-ui,sans-serif", background: "var(--bg)", color: "var(--ink)", minHeight: "100vh", paddingBottom: 148, maxWidth: 760, margin: "0 auto", position: "relative" },
+  loadingWrap: { display: "flex", alignItems: "center", justifyContent: "center", height: "60vh", color: "var(--muted)", fontFamily: "Inter,system-ui,sans-serif" },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 18px 10px" },
   brand: { display: "flex", alignItems: "center", gap: 11, minWidth: 0 },
-  brandMark: { width: 34, height: 34, borderRadius: 10, background: "linear-gradient(135deg,var(--teal),var(--teal-dk))", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
-  brandTitle: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 19, lineHeight: 1 },
-  brandSub: { fontSize: 11, color: "var(--muted)", marginTop: 3 },
+  brandMark: { width: 36, height: 36, borderRadius: 12, background: "linear-gradient(140deg,var(--teal),var(--teal-dk))", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: "0 4px 12px -4px rgba(34,68,58,.45)" },
+  brandTitle: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 20, lineHeight: 1 },
+  brandSub: { fontSize: 11, color: "var(--muted)", marginTop: 4 },
   saveDot: { fontSize: 10.5, color: "var(--muted)", display: "inline-flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" },
-  monthBar: { display: "flex", alignItems: "center", justifyContent: "center", gap: 14, padding: "4px 0 14px" },
-  monthArrow: { width: 34, height: 34, borderRadius: 9, fontSize: 22, color: "var(--ink)", lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", background: "#fff", border: "1px solid var(--line)" },
-  monthLabel: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 17, minWidth: 160, textAlign: "center" },
+  monthBar: { display: "flex", alignItems: "center", justifyContent: "center", gap: 14, padding: "2px 0 16px" },
+  monthArrow: { width: 36, height: 36, borderRadius: 12, fontSize: 22, color: "var(--muted)", lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--surface)", boxShadow: "var(--sh1)" },
+  monthLabel: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 17, minWidth: 170, textAlign: "center" },
   monthJanela: { fontSize: 10.5, color: "var(--muted)", textAlign: "center", marginTop: 2 },
   main: { padding: "0 16px" },
 
-  hero: { background: "linear-gradient(135deg,var(--teal),var(--teal-dk))", borderRadius: 18, padding: "22px 22px 20px", color: "#fff", boxShadow: "0 10px 30px -12px rgba(10,76,64,.5)" },
-  heroEye: { fontSize: 11, letterSpacing: 1.5, opacity: .8, fontWeight: 600 },
-  heroNum: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 40, lineHeight: 1.05, margin: "6px 0 12px" },
+  hero: { background: "linear-gradient(140deg,#3A6A58,var(--teal-dk))", borderRadius: 24, padding: "24px 24px 22px", color: "#fff", boxShadow: "0 18px 40px -20px rgba(34,68,58,.65)" },
+  heroEye: { fontSize: 10.5, letterSpacing: 1.6, opacity: .75, fontWeight: 600, textTransform: "uppercase" },
+  heroNum: { fontFamily: "Fraunces,serif", fontWeight: 500, fontSize: 42, lineHeight: 1.05, margin: "8px 0 14px" },
   heroRow: { display: "flex", gap: 8, flexWrap: "wrap" },
-  heroChip: { display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,.14)", padding: "5px 10px", borderRadius: 20, fontSize: 12.5, fontWeight: 500 },
-  heroSavings: { marginTop: 12, fontSize: 12.5, opacity: .92 },
+  heroChip: { display: "inline-flex", alignItems: "center", gap: 5, background: "rgba(255,255,255,.13)", padding: "6px 11px", borderRadius: 20, fontSize: 12.5, fontWeight: 500 },
+  heroSavings: { marginTop: 13, fontSize: 12.5, opacity: .9 },
+  heroRitmo: { marginTop: 14, paddingTop: 13, borderTop: "1px solid rgba(255,255,255,.16)", fontSize: 12, opacity: .92, lineHeight: 1.5 },
+  heroRitmoBar: { height: 4, background: "rgba(255,255,255,.18)", borderRadius: 20, overflow: "hidden", marginTop: 8 },
+  heroRitmoFill: { height: "100%", borderRadius: 20, background: "rgba(255,255,255,.65)", transition: "width .6s cubic-bezier(.2,.7,.3,1)" },
 
   kpiRow: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 },
-  kpi: { background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 14, padding: "13px 13px 12px" },
-  kpiLabel: { fontSize: 11, color: "var(--muted)", fontWeight: 500, lineHeight: 1.2 },
-  kpiVal: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 19, marginTop: 5 },
-  kpiHint: { fontSize: 10, color: "#9aa39d", marginTop: 3 },
+  kpi: { background: "var(--surface)", borderRadius: 16, padding: "14px 14px 13px", boxShadow: "var(--sh1)" },
+  kpiLabel: { fontSize: 10.5, color: "var(--muted)", fontWeight: 500, lineHeight: 1.25 },
+  kpiVal: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 19, marginTop: 6 },
+  kpiHint: { fontSize: 10, color: "#A5AAA5", marginTop: 3 },
 
-  sectionTitle: { fontFamily: "Fraunces,serif", fontSize: 15, fontWeight: 600, margin: "4px 2px", color: "var(--ink)" },
-  card: { background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 14, padding: 16 },
+  sectionTitle: { fontFamily: "Fraunces,serif", fontSize: 15.5, fontWeight: 600, margin: "6px 2px 0", color: "var(--ink)" },
+  card: { background: "var(--surface)", borderRadius: 18, padding: 18, boxShadow: "var(--sh1)" },
   muted: { fontSize: 12, color: "var(--muted)" },
-  empty: { background: "#fff", border: "1px dashed #cfd8d1", borderRadius: 14, padding: "18px 16px", fontSize: 13.5, color: "var(--muted)", textAlign: "center", lineHeight: 1.55 },
+  empty: { background: "var(--surface)", border: "1px dashed #DDD8CC", borderRadius: 18, padding: "20px 18px", fontSize: 13.5, color: "var(--muted)", textAlign: "center", lineHeight: 1.6 },
   rowBetween: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 },
 
   envGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 10 },
-  envelope: { background: "var(--surface)", border: "2px solid", borderRadius: 16, padding: "14px 14px 12px" },
-  envTop: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8, gap: 6, flexWrap: "wrap" },
-  envName: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 16 },
+  envelope: { background: "var(--surface)", borderRadius: 18, padding: "15px 15px 13px", boxShadow: "var(--sh1)", borderTop: "3px solid" },
+  envTop: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 9, gap: 6, flexWrap: "wrap" },
+  envName: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 16 },
   envMesada: { fontSize: 10.5, color: "var(--muted)", whiteSpace: "nowrap" },
   envNum: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 22, lineHeight: 1 },
-  envSub: { fontSize: 10.5, color: "var(--muted)", marginTop: 2, marginBottom: 10 },
-  envBarWrap: { height: 8, background: "#eef1ee", borderRadius: 20, overflow: "hidden" },
-  envBarFill: { height: "100%", borderRadius: 20, transition: "width .5s cubic-bezier(.2,.7,.3,1)" },
-  envFoot: { fontSize: 10.5, color: "var(--muted)", marginTop: 7 },
-  mesadaBreak: { display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11.5, color: "var(--muted)", padding: "0 2px" },
-  envSimul: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(88px,1fr))", gap: 8, marginTop: 14, padding: "12px 0 0", borderTop: "1px solid var(--line)", textAlign: "center", fontSize: 14, fontFamily: "Fraunces,serif" },
-  resumoCascata: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(88px,1fr))", gap: 8, marginTop: 14, padding: "12px 0 0", borderTop: "1px solid var(--line)", textAlign: "center", fontSize: 14, fontFamily: "Fraunces,serif" },
+  envSub: { fontSize: 10.5, color: "var(--muted)", marginTop: 3, marginBottom: 11 },
+  envBarWrap: { height: 6, background: "#EFECE4", borderRadius: 20, overflow: "hidden" },
+  envBarFill: { height: "100%", borderRadius: 20, transition: "width .6s cubic-bezier(.2,.7,.3,1)" },
+  envFoot: { fontSize: 10.5, color: "var(--muted)", marginTop: 8 },
+  mesadaBreak: { display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11.5, color: "var(--muted)", padding: "0 4px" },
+  envSimul: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(88px,1fr))", gap: 8, marginTop: 15, padding: "13px 0 0", borderTop: "1px solid var(--line)", textAlign: "center", fontSize: 14, fontFamily: "Fraunces,serif" },
+  resumoCascata: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(88px,1fr))", gap: 8, marginTop: 15, padding: "13px 0 0", borderTop: "1px solid var(--line)", textAlign: "center", fontSize: 14, fontFamily: "Fraunces,serif" },
 
-  bar2: { height: 10, background: "#eef1ee", borderRadius: 20, overflow: "hidden" },
-  bar2fill: { height: "100%", borderRadius: 20, transition: "width .5s ease" },
+  simulLabel: { display: "block", fontSize: 11, color: "var(--muted)", fontFamily: "Inter,system-ui,sans-serif", fontWeight: 500, marginBottom: 3 },
+
+  bar2: { height: 8, background: "#EFECE4", borderRadius: 20, overflow: "hidden" },
+  bar2fill: { height: "100%", borderRadius: 20, transition: "width .6s cubic-bezier(.2,.7,.3,1)" },
 
   formGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
-  field: { display: "flex", flexDirection: "column", gap: 5 },
+  field: { display: "flex", flexDirection: "column", gap: 6 },
   fieldLabel: { fontSize: 11.5, color: "var(--muted)", fontWeight: 600 },
   chipWrap: { display: "flex", flexWrap: "wrap", gap: 6 },
-  chipBtn: { padding: "7px 13px", borderRadius: 20, fontSize: 13, fontWeight: 600, color: "var(--muted)", background: "#fff", border: "1px solid var(--line)" },
-  formFoot: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, gap: 10 },
-  tag: { fontSize: 11.5, color: "var(--muted)", background: "#f1f4f0", padding: "5px 10px", borderRadius: 20 },
-  primaryBtn: { display: "inline-flex", alignItems: "center", gap: 6, background: "var(--teal)", color: "#fff", padding: "10px 18px", borderRadius: 10, fontSize: 14, fontWeight: 600 },
-  parcelaPrev: { fontSize: 12, color: "var(--teal)", marginTop: 10, marginBottom: 0, background: "#EAF3EF", padding: "8px 11px", borderRadius: 9, lineHeight: 1.5 },
+  chipBtn: { padding: "8px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, color: "var(--muted)", background: "#F1EFE9", transition: "background .15s,color .15s" },
+  formFoot: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16, gap: 10 },
+  tag: { fontSize: 11.5, color: "var(--muted)", background: "#F1EFE9", padding: "6px 11px", borderRadius: 20 },
+  primaryBtn: { display: "inline-flex", alignItems: "center", gap: 6, background: "var(--teal)", color: "#fff", padding: "11px 20px", borderRadius: 12, fontSize: 14, fontWeight: 600 },
+  parcelaPrev: { fontSize: 12, color: "#2C5648", marginTop: 12, marginBottom: 0, background: "#E8F0EC", padding: "10px 12px", borderRadius: 12, lineHeight: 1.55 },
   warn: { fontSize: 12, color: "var(--gold)", marginTop: 10, marginBottom: 0 },
-  warnBox: { background: "#FFF7E6", border: "1px solid #F0DEB4", borderRadius: 12, padding: "10px 13px", fontSize: 12.5, color: "#7A5B18", lineHeight: 1.5 },
-  warnInline: { fontSize: 11, color: "#8A6416", background: "#FFF7E6", padding: "6px 9px", borderRadius: 8 },
-  okBox: { background: "#EAF3EF", border: "1px solid #CFE3DA", borderRadius: 12, padding: "10px 13px", fontSize: 12.5, color: "#22574A", lineHeight: 1.5 },
+  warnBox: { background: "#FBF3E2", borderRadius: 14, padding: "12px 14px", fontSize: 12.5, color: "#7A5B18", lineHeight: 1.55 },
+  warnInline: { fontSize: 11, color: "#7A5B18", background: "#FBF3E2", padding: "7px 10px", borderRadius: 10 },
+  okBox: { background: "#E8F0EC", borderRadius: 14, padding: "12px 14px", fontSize: 12.5, color: "#2C5648", lineHeight: 1.55 },
 
-  txRow: { display: "flex", alignItems: "center", gap: 11, background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 12, padding: "11px 12px" },
-  txDot: { width: 9, height: 9, borderRadius: 9, flexShrink: 0 },
+  txRow: { display: "flex", alignItems: "center", gap: 11, background: "var(--surface)", borderRadius: 14, padding: "12px 13px", boxShadow: "var(--sh1)" },
+  txDot: { width: 8, height: 8, borderRadius: 8, flexShrink: 0 },
   txCat: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  txMeta: { fontSize: 11.5, color: "var(--muted)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  txMeta: { fontSize: 11.5, color: "var(--muted)", marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
   txVal: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 15, whiteSpace: "nowrap" },
   delBtn: { padding: 6, borderRadius: 8, color: "var(--muted)", display: "flex" },
 
-  editCard: { background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 12, padding: 12, display: "grid", gap: 8 },
+  editCard: { background: "var(--surface)", borderRadius: 16, padding: 14, display: "grid", gap: 9, boxShadow: "var(--sh1)" },
   editRow2: { display: "flex", gap: 8, alignItems: "flex-end" },
-  addLink: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12.5, fontWeight: 600, color: "var(--teal)", padding: "6px 10px", borderRadius: 8, background: "#fff", border: "1px solid var(--line)", whiteSpace: "nowrap" },
-  miniBtn: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 600, color: "var(--muted)", padding: "7px 9px", borderRadius: 8, background: "#f4f6f3", border: "1px solid var(--line)", whiteSpace: "nowrap" },
-  saldoAtual: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 16, whiteSpace: "nowrap", marginLeft: 8 },
-  saldoBreak: { fontSize: 11, color: "#8f9a93" },
-  autoNote: { display: "flex", gap: 8, alignItems: "flex-start", background: "#EAF3EF", border: "1px solid #CFE3DA", borderRadius: 12, padding: "10px 13px", fontSize: 12.5, color: "#22574A", lineHeight: 1.45 },
+  addLink: { display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 600, color: "var(--teal)", padding: "7px 12px", borderRadius: 20, background: "var(--surface)", boxShadow: "var(--sh1)", whiteSpace: "nowrap" },
+  miniBtn: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 600, color: "var(--muted)", padding: "7px 11px", borderRadius: 20, background: "#F1EFE9", whiteSpace: "nowrap" },
+  saldoAtual: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 16, whiteSpace: "nowrap", marginLeft: 8 },
+  saldoBreak: { fontSize: 11, color: "#9AA09B" },
+  autoNote: { display: "flex", gap: 9, alignItems: "flex-start", background: "#E8F0EC", borderRadius: 14, padding: "12px 14px", fontSize: 12.5, color: "#2C5648", lineHeight: 1.5 },
 
   cfgGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
-  help: { fontSize: 12, color: "var(--muted)", lineHeight: 1.55, marginTop: 12, marginBottom: 0 },
-  softBtn: { display: "inline-flex", alignItems: "center", gap: 7, fontSize: 13, fontWeight: 600, color: "var(--ink)", padding: "9px 14px", borderRadius: 10, background: "#fff", border: "1px solid var(--line)" },
-  modoBox: { display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.45 },
+  help: { fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginTop: 14, marginBottom: 0 },
+  softBtn: { display: "inline-flex", alignItems: "center", gap: 7, fontSize: 13, fontWeight: 600, color: "var(--ink)", padding: "10px 15px", borderRadius: 12, background: "#F1EFE9" },
+  modoBox: { display: "flex", gap: 9, alignItems: "flex-start", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 },
 
   metaRow: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 },
-  metaField: { display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "var(--muted)", fontWeight: 600, flex: 1, minWidth: 0 },
+  metaField: { display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted)", fontWeight: 600, flex: 1, minWidth: 0 },
 
-  prevRow: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid #F2F5F1" },
+  prevRow: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #F2F0EA" },
   prevCat: { fontSize: 13.5, fontWeight: 500 },
-  prevReal: { fontSize: 11, color: "var(--muted)", marginTop: 2 },
-  faturaCard: { background: "#FFFCF4", border: "1px solid #EBDCB8", borderRadius: 14, padding: 15 },
-  faturaTitulo: { display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 15, color: "#8A6416" },
-  faturaValor: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 19, color: "#8A6416" },
-  faturaLinha: { display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "#6b5b33", padding: "8px 0", borderBottom: "1px solid #EFE6D0" },
-  faturaTotal: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, paddingTop: 11, marginTop: 2, borderTop: "2px solid #E3D3A6", fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 14, color: "#8A6416" },
-  faturaHint: { fontSize: 11.5, color: "#8a7a55", marginTop: 7, lineHeight: 1.45 },
-  expandBtn: { fontSize: 12.5, fontWeight: 600, color: "var(--teal)", padding: "10px", borderRadius: 10, background: "#fff", border: "1px dashed #cfd8d1" },
-  contaLinha: { display: "flex", justifyContent: "space-between", fontSize: 13.5, padding: "7px 0", color: "var(--ink)" },
-  subNota: { fontSize: 11, color: "var(--muted)", lineHeight: 1.45, margin: "-2px 0 6px", paddingLeft: 2 },
-  contaTotal: { fontWeight: 700, borderTop: "1px solid var(--line)", marginTop: 4, paddingTop: 10, fontSize: 15 },
-  investLinha: { display: "flex", gap: 7, alignItems: "center", marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line)", fontSize: 12.5, color: "var(--teal)" },
+  prevReal: { fontSize: 11, color: "var(--muted)", marginTop: 3 },
+  faturaCard: { background: "#FBF6EA", borderRadius: 18, padding: 17, boxShadow: "var(--sh1)" },
+  faturaTitulo: { display: "inline-flex", alignItems: "center", gap: 7, fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 15, color: "#8A6C2E" },
+  faturaValor: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 19, color: "#8A6C2E" },
+  faturaLinha: { display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "#6F5E3A", padding: "9px 0", borderBottom: "1px solid #EFE7D5" },
+  faturaTotal: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, paddingTop: 12, marginTop: 2, borderTop: "2px solid #E4D8BB", fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 14, color: "#8A6C2E" },
+  faturaHint: { fontSize: 11.5, color: "#8D7C58", marginTop: 9, lineHeight: 1.5 },
+  expandBtn: { fontSize: 12.5, fontWeight: 600, color: "var(--teal)", padding: "12px", borderRadius: 14, background: "transparent", border: "1px dashed #DDD8CC" },
+  contaLinha: { display: "flex", justifyContent: "space-between", fontSize: 13.5, padding: "8px 0", color: "var(--ink)" },
+  subNota: { fontSize: 11, color: "var(--muted)", lineHeight: 1.5, margin: "-2px 0 6px", paddingLeft: 2 },
+  contaTotal: { fontWeight: 700, borderTop: "1px solid var(--line)", marginTop: 4, paddingTop: 11, fontSize: 15 },
+  investLinha: { display: "flex", gap: 8, alignItems: "center", marginTop: 15, paddingTop: 13, borderTop: "1px solid var(--line)", fontSize: 12.5, color: "var(--teal)" },
 
   /* dívidas */
-  dividaResumo: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, width: "100%", background: "#FDF2EE", border: "1px solid #EFCFC3", borderRadius: 14, padding: "13px 15px" },
-  dividaResumoTop: { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 700, color: "#8B3F2A" },
-  dividaResumoSub: { fontSize: 11.5, color: "#a2705f", marginTop: 3 },
-  dividaResumoVal: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 20, color: "#8B3F2A", whiteSpace: "nowrap" },
-  dividaCard: { background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 14, padding: 15, display: "grid", gap: 10 },
-  dividaNome: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 16, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  dividaSub: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 },
+  dividaResumo: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, width: "100%", background: "#FAEDE8", borderRadius: 18, padding: "15px 17px", boxShadow: "var(--sh1)" },
+  dividaResumoTop: { display: "inline-flex", alignItems: "center", gap: 7, fontSize: 13, fontWeight: 700, color: "#8E442E" },
+  dividaResumoSub: { fontSize: 11.5, color: "#A9776A", marginTop: 4 },
+  dividaResumoVal: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 20, color: "#8E442E", whiteSpace: "nowrap" },
+  dividaCard: { background: "var(--surface)", borderRadius: 18, padding: 17, display: "grid", gap: 11, boxShadow: "var(--sh1)" },
+  dividaNome: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 16.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  dividaSub: { fontSize: 11.5, color: "var(--muted)", marginTop: 3 },
   dividaNums: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 },
   dividaLabel: { display: "block", fontSize: 10.5, color: "var(--muted)", fontWeight: 600 },
-  dividaVal: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 16, display: "block", marginTop: 2 },
-  dividaFoot: { fontSize: 11, color: "var(--muted)", marginTop: 6 },
-  dividaJuros: { fontSize: 11.5, color: "#7A5B18", background: "#FFF7E6", border: "1px solid #F0DEB4", borderRadius: 9, padding: "8px 11px", lineHeight: 1.5 },
-  dividaForm: { borderTop: "1px solid var(--line)", paddingTop: 14, marginTop: 4 },
-  quitadoTag: { display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 600, color: "var(--teal)", background: "#EAF3EF", padding: "6px 11px", borderRadius: 20, justifySelf: "start" },
+  dividaVal: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 16, display: "block", marginTop: 3 },
+  dividaFoot: { fontSize: 11, color: "var(--muted)", marginTop: 7 },
+  dividaJuros: { fontSize: 11.5, color: "#7A5B18", background: "#FBF3E2", borderRadius: 12, padding: "10px 12px", lineHeight: 1.55 },
+  dividaForm: { borderTop: "1px solid var(--line)", paddingTop: 16, marginTop: 4 },
+  quitadoTag: { display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 600, color: "var(--teal)", background: "#E8F0EC", padding: "7px 13px", borderRadius: 20, justifySelf: "start" },
 
   /* linha do tempo */
   timeline: { display: "grid", gap: 0 },
-  tlItem: { display: "flex", gap: 12 },
+  tlItem: { display: "flex", gap: 13 },
   tlDotWrap: { display: "flex", flexDirection: "column", alignItems: "center", width: 12, flexShrink: 0 },
-  tlDot: { width: 10, height: 10, borderRadius: 10, background: "var(--teal)", marginTop: 4, flexShrink: 0 },
-  tlLine: { width: 2, flex: 1, background: "#DCE5DF", marginTop: 3 },
-  tlData: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 14, color: "var(--teal)" },
-  tlNome: { fontSize: 13, fontWeight: 600, marginTop: 1 },
-  tlValor: { fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.45 },
-  tlAcum: { color: "#8f9a93" },
-  tlFinal: { marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line)", fontSize: 12.5, color: "var(--teal)", lineHeight: 1.5 },
+  tlDot: { width: 9, height: 9, borderRadius: 9, background: "var(--teal)", marginTop: 5, flexShrink: 0, boxShadow: "0 0 0 4px #E8F0EC" },
+  tlLine: { width: 2, flex: 1, background: "#E4E1D8", marginTop: 5 },
+  tlData: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 14, color: "var(--teal)" },
+  tlNome: { fontSize: 13, fontWeight: 600, marginTop: 2 },
+  tlValor: { fontSize: 11.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 },
+  tlAcum: { color: "#9AA09B" },
+  tlFinal: { marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--line)", fontSize: 12.5, color: "var(--teal)", lineHeight: 1.55 },
 
   /* câmbio */
-  cotCard: { background: "#F3F7FB", border: "1px solid #D3E0EC", borderRadius: 14, padding: 15 },
-  cotTitulo: { display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 15, color: "#2F5675" },
-  cotRow: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 },
-  cotLabel: { display: "block", fontSize: 11, color: "#6a8299", fontWeight: 600 },
-  cotVal: { fontFamily: "Fraunces,serif", fontWeight: 700, fontSize: 20, color: "#2F5675", display: "block", marginTop: 2 },
-  cotFoot: { fontSize: 11, color: "#7d93a6", marginTop: 10 },
+  cotCard: { background: "#EFF2F5", borderRadius: 18, padding: 17, boxShadow: "var(--sh1)" },
+  cotTitulo: { display: "inline-flex", alignItems: "center", gap: 7, fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 15, color: "#3C5A70" },
+  cotRow: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 13 },
+  cotLabel: { display: "block", fontSize: 11, color: "#71879A", fontWeight: 600 },
+  cotVal: { fontFamily: "Fraunces,serif", fontWeight: 600, fontSize: 20, color: "#3C5A70", display: "block", marginTop: 3 },
+  cotFoot: { fontSize: 11, color: "#8598A7", marginTop: 11 },
 
-  nav: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 760, background: "rgba(255,255,255,.94)", backdropFilter: "blur(10px)", borderTop: "1px solid var(--line)", display: "flex", justifyContent: "space-around", padding: "8px 2px 10px", zIndex: 10 },
-  navBtn: { display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: "var(--muted)", padding: "4px 2px", flex: 1, minWidth: 0 },
+  /* navegação */
+  nav: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 760, background: "rgba(246,245,241,.88)", backdropFilter: "blur(14px)", borderTop: "1px solid var(--line)", display: "flex", justifyContent: "space-around", padding: "9px 2px 12px", zIndex: 10 },
+  navBtn: { display: "flex", flexDirection: "column", alignItems: "center", gap: 4, color: "var(--muted)", padding: "4px 2px", flex: 1, minWidth: 0, transition: "color .15s" },
   navBtnOn: { color: "var(--teal)" },
   navLabel: { fontSize: 9.5, fontWeight: 600, whiteSpace: "nowrap" },
+  fab: {
+    position: "fixed", bottom: 80, right: "max(18px, calc(50vw - 362px))",
+    width: 56, height: 56, borderRadius: 20, zIndex: 11,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: "linear-gradient(140deg,#3A6A58,var(--teal-dk))", color: "#fff",
+    boxShadow: "0 10px 26px -8px rgba(34,68,58,.55)",
+  },
 };
